@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 
 struct ToroidalLife {
     let width: Int
@@ -93,81 +94,136 @@ func makeWraparoundGlider(width: Int, height: Int) -> ToroidalLife {
     return life
 }
 
-func writeGridSVG(_ life: ToroidalLife, title: String, path: String, cellSize: Int = 10) throws {
+func pngData(width: Int, height: Int, draw: (CGContext) -> Void) throws -> Data {
+    guard let bitmap = NSBitmapImageRep(
+        bitmapDataPlanes: nil,
+        pixelsWide: width,
+        pixelsHigh: height,
+        bitsPerSample: 8,
+        samplesPerPixel: 4,
+        hasAlpha: true,
+        isPlanar: false,
+        colorSpaceName: .deviceRGB,
+        bytesPerRow: width * 4,
+        bitsPerPixel: 32
+    ), let context = NSGraphicsContext(bitmapImageRep: bitmap)?.cgContext else {
+        throw NSError(domain: "Visualization", code: 1, userInfo: [NSLocalizedDescriptionKey: "Could not create bitmap context"])
+    }
+
+    context.setAllowsAntialiasing(false)
+    context.setShouldAntialias(false)
+    draw(context)
+
+    guard let data = bitmap.representation(using: .png, properties: [:]) else {
+        throw NSError(domain: "Visualization", code: 2, userInfo: [NSLocalizedDescriptionKey: "Could not encode PNG"])
+    }
+
+    return data
+}
+
+func writePNG(_ data: Data, path: String) throws {
+    try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+}
+
+func writeGridPNG(_ life: ToroidalLife, path: String, cellSize: Int = 10) throws {
     let width = life.width * cellSize
     let height = life.height * cellSize
-    var svg = """
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 \(width) \(height)" role="img" aria-label="\(title)">
-    <title>\(title)</title>
-    <rect width="100%" height="100%" fill="#05070c"/>
-    """
 
-    for y in 0..<life.height {
-        for x in 0..<life.width where life.alive(x, y) {
-            let px = x * cellSize
-            let py = y * cellSize
-            svg += "\n<rect x=\"\(px)\" y=\"\(py)\" width=\"\(cellSize)\" height=\"\(cellSize)\" fill=\"#45d1c8\"/>"
+    let data = try pngData(width: width, height: height) { context in
+        context.setFillColor(CGColor(red: 0.02, green: 0.027, blue: 0.047, alpha: 1.0))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+
+        context.setFillColor(CGColor(red: 0.27, green: 0.82, blue: 0.78, alpha: 1.0))
+
+        for y in 0..<life.height {
+            for x in 0..<life.width where life.alive(x, y) {
+                let px = x * cellSize
+                let py = y * cellSize
+                context.fill(CGRect(x: px, y: py, width: cellSize, height: cellSize))
+            }
         }
     }
 
-    svg += "\n</svg>\n"
-    try svg.write(toFile: path, atomically: true, encoding: .utf8)
+    try writePNG(data, path: path)
 }
 
 func writeDensityPlot(_ values: [Double], path: String) throws {
-    let width = 960.0
-    let height = 420.0
+    let width = 960
+    let height = 420
     let padding = 48.0
     let maxValue = max(values.max() ?? 1.0, 0.01)
 
-    func point(_ index: Int, _ value: Double) -> String {
-        let x = padding + (Double(index) / Double(values.count - 1)) * (width - padding * 2)
-        let y = height - padding - (value / maxValue) * (height - padding * 2)
-        return "\(String(format: "%.2f", x)),\(String(format: "%.2f", y))"
+    let data = try pngData(width: width, height: height) { context in
+        context.setShouldAntialias(true)
+        context.setAllowsAntialiasing(true)
+
+        context.setFillColor(CGColor(red: 0.97, green: 0.98, blue: 0.99, alpha: 1.0))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+
+        context.setStrokeColor(CGColor(red: 0.60, green: 0.65, blue: 0.70, alpha: 1.0))
+        context.setLineWidth(2)
+        context.move(to: CGPoint(x: padding, y: Double(height) - padding))
+        context.addLine(to: CGPoint(x: Double(width) - padding, y: Double(height) - padding))
+        context.move(to: CGPoint(x: padding, y: padding))
+        context.addLine(to: CGPoint(x: padding, y: Double(height) - padding))
+        context.strokePath()
+
+        context.setStrokeColor(CGColor(red: 0.09, green: 0.49, blue: 0.50, alpha: 1.0))
+        context.setLineWidth(4)
+        context.setLineJoin(.round)
+        context.setLineCap(.round)
+
+        for (index, value) in values.enumerated() {
+            let x = padding + (Double(index) / Double(values.count - 1)) * (Double(width) - padding * 2)
+            let y = Double(height) - padding - (value / maxValue) * (Double(height) - padding * 2)
+
+            if index == 0 {
+                context.move(to: CGPoint(x: x, y: y))
+            } else {
+                context.addLine(to: CGPoint(x: x, y: y))
+            }
+        }
+        context.strokePath()
+
+        let title = "Toroidal Game of Life density, 256 generations"
+        let finalDensity = String(format: "final density %.3f", values.last ?? 0)
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: 18, weight: .regular),
+            .foregroundColor: NSColor(red: 0.11, green: 0.15, blue: 0.20, alpha: 1.0)
+        ]
+        title.draw(at: CGPoint(x: padding, y: 16), withAttributes: attributes)
+        finalDensity.draw(at: CGPoint(x: Double(width) - padding - 210, y: padding), withAttributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 14, weight: .regular),
+            .foregroundColor: NSColor(red: 0.30, green: 0.35, blue: 0.40, alpha: 1.0)
+        ])
     }
 
-    let points = values.enumerated().map(point).joined(separator: " ")
-    let lastDensity = values.last ?? 0
-
-    let svg = """
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 \(Int(width)) \(Int(height))" role="img" aria-label="Live-cell density over time">
-    <title>Live-cell density over time</title>
-    <rect width="100%" height="100%" fill="#f7f9fb"/>
-    <line x1="\(padding)" y1="\(height - padding)" x2="\(width - padding)" y2="\(height - padding)" stroke="#9aa6b2" stroke-width="2"/>
-    <line x1="\(padding)" y1="\(padding)" x2="\(padding)" y2="\(height - padding)" stroke="#9aa6b2" stroke-width="2"/>
-    <polyline points="\(points)" fill="none" stroke="#167c80" stroke-width="4" stroke-linejoin="round" stroke-linecap="round"/>
-    <text x="\(padding)" y="28" fill="#1c2733" font-family="Menlo, monospace" font-size="18">Toroidal Game of Life density, 256 generations</text>
-    <text x="\(padding)" y="\(height - 14)" fill="#4c5967" font-family="Menlo, monospace" font-size="14">generation</text>
-    <text x="\(width - padding - 190)" y="\(padding + 18)" fill="#4c5967" font-family="Menlo, monospace" font-size="14">final density \(String(format: "%.3f", lastDensity))</text>
-    </svg>
-    """
-
-    try svg.write(toFile: path, atomically: true, encoding: .utf8)
+    try writePNG(data, path: path)
 }
 
 let outputDirectory = "Visualizations"
 try FileManager.default.createDirectory(atPath: outputDirectory, withIntermediateDirectories: true)
 
 var randomLife = makeRandomLife(width: 96, height: 96, density: 0.30, seed: 0xC0FFEE)
-try writeGridSVG(randomLife, title: "Random toroidal seed", path: "\(outputDirectory)/random-seed.svg", cellSize: 6)
+try writeGridPNG(randomLife, path: "\(outputDirectory)/random-seed.png", cellSize: 6)
 
 var densities: [Double] = []
 for generation in 0...256 {
     densities.append(Double(randomLife.liveCount()) / Double(randomLife.width * randomLife.height))
 
     if generation == 64 {
-        try writeGridSVG(randomLife, title: "Toroidal simulation at generation 64", path: "\(outputDirectory)/generation-064.svg", cellSize: 6)
+        try writeGridPNG(randomLife, path: "\(outputDirectory)/generation-064.png", cellSize: 6)
     }
 
     randomLife.step()
 }
-try writeDensityPlot(densities, path: "\(outputDirectory)/density-plot.svg")
+try writeDensityPlot(densities, path: "\(outputDirectory)/density-plot.png")
 
 var glider = makeWraparoundGlider(width: 28, height: 28)
-try writeGridSVG(glider, title: "Glider near toroidal edge, generation 0", path: "\(outputDirectory)/wraparound-glider-000.svg")
+try writeGridPNG(glider, path: "\(outputDirectory)/wraparound-glider-000.png")
 for _ in 0..<12 {
     glider.step()
 }
-try writeGridSVG(glider, title: "Glider after wrapping across toroidal edge", path: "\(outputDirectory)/wraparound-glider-012.svg")
+try writeGridPNG(glider, path: "\(outputDirectory)/wraparound-glider-012.png")
 
-print("Generated SVG visualizations in \(outputDirectory)/")
+print("Generated PNG visualizations in \(outputDirectory)/")
