@@ -25,7 +25,7 @@ class GameOfLifeView: MTKView {
     var stateTextures: [MTLTexture] = []
     var currentStateIndex = 0
     
-    var isPaused = false
+    var simulationPaused = false
     var frameCount: UInt32 = 0
     var startTime = Date()
     var launchTime = Date()
@@ -113,7 +113,7 @@ class GameOfLifeView: MTKView {
             fatalError("Could not find Shaders.metal. Run the app from the project directory.")
         }
 
-        let shaderSource = try! String(contentsOfFile: shaderPath)
+        let shaderSource = try! String(contentsOfFile: shaderPath, encoding: .utf8)
         let library = try! device.makeLibrary(source: shaderSource, options: nil)
         
         gameOfLifePipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "gameOfLife")!)
@@ -177,10 +177,27 @@ class GameOfLifeView: MTKView {
     }
     
     override func keyDown(with event: NSEvent) {
+        switch event.keyCode {
+        case 123:
+            panX -= 0.04 / zoom
+            return
+        case 124:
+            panX += 0.04 / zoom
+            return
+        case 125:
+            panY += 0.04 / zoom
+            return
+        case 126:
+            panY -= 0.04 / zoom
+            return
+        default:
+            break
+        }
+
         switch event.charactersIgnoringModifiers {
         case " ":
-            isPaused.toggle()
-            print(isPaused ? "Paused" : "Resumed")
+            simulationPaused.toggle()
+            print(simulationPaused ? "Paused" : "Resumed")
         case "r", "R":
             randomizeGrid(density: 0.3)
             print("Randomized")
@@ -191,14 +208,6 @@ class GameOfLifeView: MTKView {
             zoom = min(zoom * 1.25, 32.0)
         case "-", "_":
             zoom = max(zoom / 1.25, 1.0)
-        case NSLeftArrowFunctionKey:
-            panX -= 0.04 / zoom
-        case NSRightArrowFunctionKey:
-            panX += 0.04 / zoom
-        case NSUpArrowFunctionKey:
-            panY -= 0.04 / zoom
-        case NSDownArrowFunctionKey:
-            panY += 0.04 / zoom
         default:
             super.keyDown(with: event)
         }
@@ -219,7 +228,7 @@ extension GameOfLifeView: MTKViewDelegate {
         let elapsedTime = Float(Date().timeIntervalSince(startTime))
         
         // Run simulation
-        if !isPaused {
+        if !simulationPaused {
             encoder.setComputePipelineState(gameOfLifePipeline)
             encoder.setTexture(stateTextures[currentStateIndex], index: 0)
             encoder.setTexture(stateTextures[1 - currentStateIndex], index: 1)

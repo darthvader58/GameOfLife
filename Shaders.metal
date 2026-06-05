@@ -1,10 +1,40 @@
 #include <metal_stdlib>
 using namespace metal;
 
+struct RenderUniforms {
+    uint gridWidth;
+    uint gridHeight;
+    uint viewportWidth;
+    uint viewportHeight;
+    float time;
+    float zoom;
+    float panX;
+    float panY;
+};
+
+static uint wrapCoordinate(int value, uint size)
+{
+    return uint((value + int(size)) % int(size));
+}
+
+static float3 heatColor(float intensity)
+{
+    float t = clamp(intensity, 0.0, 1.0);
+    float3 cold = float3(0.02, 0.04, 0.08);
+    float3 mid = float3(0.10, 0.66, 0.72);
+    float3 hot = float3(1.00, 0.86, 0.35);
+
+    if (t < 0.5) {
+        return mix(cold, mid, t * 2.0);
+    }
+
+    return mix(mid, hot, (t - 0.5) * 2.0);
+}
+
 // Conway's Game of Life compute shader
 kernel void gameOfLife(
-    texture2d<float, access::read> currentState [[texture(0)]],
-    texture2d<float, access::write> nextState [[texture(1)]],
+    texture2d<uint, access::read> currentState [[texture(0)]],
+    texture2d<uint, access::write> nextState [[texture(1)]],
     uint2 gid [[thread_position_in_grid]])
 {
     uint width = currentState.get_width();
@@ -14,45 +44,33 @@ kernel void gameOfLife(
         return;
     }
     
-    // Count living neighbors
-    int aliveNeighbors = 0;
+    uint aliveNeighbors = 0;
     
     for (int dy = -1; dy <= 1; dy++) {
         for (int dx = -1; dx <= 1; dx++) {
             if (dx == 0 && dy == 0) continue;
             
-            // Wrap around edges (toroidal topology)
-            int nx = (int(gid.x) + dx + int(width)) % int(width);
-            int ny = (int(gid.y) + dy + int(height)) % int(height);
+            uint nx = wrapCoordinate(int(gid.x) + dx, width);
+            uint ny = wrapCoordinate(int(gid.y) + dy, height);
             
-            float4 neighbor = currentState.read(uint2(nx, ny));
-            if (neighbor.r > 0.5) {
+            if (currentState.read(uint2(nx, ny)).r > 0) {
                 aliveNeighbors++;
             }
         }
     }
     
-    // Read current cell state
-    float4 current = currentState.read(gid);
-    bool isAlive = current.r > 0.5;
+    bool isAlive = currentState.read(gid).r > 0;
     
-    // Apply Conway's rules
-    bool nextAlive = false;
-    if (isAlive) {
-        nextAlive = (aliveNeighbors == 2 || aliveNeighbors == 3);
-    } else {
-        nextAlive = (aliveNeighbors == 3);
-    }
+    bool nextAlive = isAlive
+        ? (aliveNeighbors == 2 || aliveNeighbors == 3)
+        : (aliveNeighbors == 3);
     
-    // Write result with age tracking in green channel
-    float age = isAlive ? min(current.g + 0.01, 1.0) : 0.0;
-    float4 output = nextAlive ? float4(1.0, age, 0.0, 1.0) : float4(0.0, 0.0, 0.0, 1.0);
-    nextState.write(output, gid);
+    nextState.write(nextAlive ? 255 : 0, gid);
 }
 
 // Initialize random pattern
 kernel void randomize(
-    texture2d<float, access::write> state [[texture(0)]],
+    texture2d<uint, access::write> state [[texture(0)]],
     constant float& density [[buffer(0)]],
     constant uint& seed [[buffer(1)]],
     uint2 gid [[thread_position_in_grid]])
@@ -69,51 +87,57 @@ kernel void randomize(
     float random = float(hash % 10000) / 10000.0;
     
     bool alive = random < density;
-    float4 color = alive ? float4(1.0, 0.0, 0.0, 1.0) : float4(0.0, 0.0, 0.0, 1.0);
-    state.write(color, gid);
+    state.write(alive ? 255 : 0, gid);
 }
 
-// Visualization shader with color cycling
+// Render the toroidal plane into the current drawable.
 kernel void visualize(
-    texture2d<float, access::read> state [[texture(0)]],
+    texture2d<uint, access::read> state [[texture(0)]],
     texture2d<float, access::write> output [[texture(1)]],
-    constant float& time [[buffer(0)]],
+    constant RenderUniforms& uniforms [[buffer(0)]],
     uint2 gid [[thread_position_in_grid]])
 {
-    uint width = state.get_width();
-    uint height = state.get_height();
-    
-    if (gid.x >= width || gid.y >= height) {
+    if (gid.x >= output.get_width() || gid.y >= output.get_height()) {
         return;
     }
+
+    float aspect = float(uniforms.viewportWidth) / max(float(uniforms.viewportHeight), 1.0);
+    float2 uv = (float2(gid) + 0.5) / float2(uniforms.viewportWidth, uniforms.viewportHeight);
+    float2 centered = uv - 0.5;
+
+    centered.x *= aspect;
+    centered /= max(uniforms.zoom, 1.0);
+    centered += float2(uniforms.panX, uniforms.panY);
+
+    float2 wrapped = fract(centered + 0.5);
+    uint2 cell = uint2(
+        wrapped.x * float(uniforms.gridWidth),
+        wrapped.y * float(uniforms.gridHeight)
+    );
     
-    float4 cell = state.read(gid);
-    bool isAlive = cell.r > 0.5;
+    bool isAlive = state.read(cell).r > 0;
+
+    uint neighbors = 0;
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            uint nx = wrapCoordinate(int(cell.x) + dx, uniforms.gridWidth);
+            uint ny = wrapCoordinate(int(cell.y) + dy, uniforms.gridHeight);
+            neighbors += state.read(uint2(nx, ny)).r > 0 ? 1 : 0;
+        }
+    }
+
+    neighbors -= isAlive ? 1 : 0;
     
     float4 color;
     if (isAlive) {
-        // Color based on cell age
-        float age = cell.g;
-        float hue = fmod(time * 0.05 + age * 0.5 + float(gid.x + gid.y) * 0.001, 1.0);
-        
-        // HSV to RGB conversion
-        float h = hue * 6.0;
-        float c = 1.0;
-        float x = c * (1.0 - abs(fmod(h, 2.0) - 1.0));
-        
-        float3 rgb;
-        if (h < 1.0) rgb = float3(c, x, 0);
-        else if (h < 2.0) rgb = float3(x, c, 0);
-        else if (h < 3.0) rgb = float3(0, c, x);
-        else if (h < 4.0) rgb = float3(0, x, c);
-        else if (h < 5.0) rgb = float3(x, 0, c);
-        else rgb = float3(c, 0, x);
-        
-        // Brightness based on age
-        float brightness = 0.5 + 0.5 * age;
-        color = float4(rgb * brightness, 1.0);
+        float pulse = 0.88 + 0.12 * sin(uniforms.time * 2.2 + float(cell.x ^ cell.y) * 0.03);
+        color = float4(heatColor(float(neighbors) / 8.0) * pulse, 1.0);
     } else {
-        color = float4(0.01, 0.01, 0.02, 1.0);
+        float gridLine = min(fract(wrapped.x * float(uniforms.gridWidth)),
+                             fract(wrapped.y * float(uniforms.gridHeight)));
+        float line = uniforms.zoom > 8.0 && gridLine < 0.035 ? 0.035 : 0.0;
+        float glow = float(neighbors) * 0.018;
+        color = float4(float3(0.006, 0.009, 0.014) + glow + line, 1.0);
     }
     
     output.write(color, gid);
@@ -121,7 +145,7 @@ kernel void visualize(
 
 // Clear all cells
 kernel void clearGrid(
-    texture2d<float, access::write> state [[texture(0)]],
+    texture2d<uint, access::write> state [[texture(0)]],
     uint2 gid [[thread_position_in_grid]])
 {
     uint width = state.get_width();
@@ -131,5 +155,5 @@ kernel void clearGrid(
         return;
     }
     
-    state.write(float4(0.0, 0.0, 0.0, 1.0), gid);
+    state.write(0, gid);
 }

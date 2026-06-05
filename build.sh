@@ -1,19 +1,21 @@
-echo "Building Conway's Game of Life on Steroids..."
+#!/bin/sh
+set -eu
+
+echo "Building Conway's Game of Life..."
 echo ""
 
-# Compile
+mkdir -p .build/module-cache
+
 swiftc -O \
+    -module-cache-path .build/module-cache \
     -framework Metal \
     -framework MetalKit \
     -framework Cocoa \
-    Sources/*.swift \
+    main.swift \
+    AppDelegate.swift \
+    GameOfLifeView.swift \
     -o GameOfLife
 
-if [ $? -eq 0 ]; then
-    echo "✓ Build successful!"
-    echo ""
-    echo "Run with: ./GameOfLife"
-else
-    echo "✗ Build failed"
-    exit 1
-fi
+echo "Build successful"
+echo ""
+echo "Run with: ./GameOfLife"
