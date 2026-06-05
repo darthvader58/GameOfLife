@@ -2,6 +2,17 @@ import Cocoa
 import MetalKit
 
 class GameOfLifeView: MTKView {
+    struct RenderUniforms {
+        var gridWidth: UInt32
+        var gridHeight: UInt32
+        var viewportWidth: UInt32
+        var viewportHeight: UInt32
+        var time: Float
+        var zoom: Float
+        var panX: Float
+        var panY: Float
+    }
+
     // Metal resources
     var commandQueue: MTLCommandQueue!
     var gameOfLifePipeline: MTLComputePipelineState!
@@ -10,21 +21,44 @@ class GameOfLifeView: MTKView {
     var clearPipeline: MTLComputePipelineState!
     
     // Simulation state
-    let GRID_SIZE = 8192  // 67 million cells!
+    let gridSize: Int
     var stateTextures: [MTLTexture] = []
     var currentStateIndex = 0
-    var displayTexture: MTLTexture!
     
     var isPaused = false
     var frameCount: UInt32 = 0
     var startTime = Date()
+    var launchTime = Date()
+    var zoom: Float = 1.0
+    var panX: Float = 0.0
+    var panY: Float = 0.0
+
+    static func chooseGridSize(for device: MTLDevice?) -> Int {
+        if let override = ProcessInfo.processInfo.environment["GOL_GRID_SIZE"],
+           let value = Int(override),
+           value >= 64 {
+            return value
+        }
+
+        guard let device else { return 2048 }
+        let bytesPerGrid = { (size: Int) in size * size * 2 }
+        let budget = max(Int(device.recommendedMaxWorkingSetSize / 8), 256 * 1024 * 1024)
+
+        if bytesPerGrid(8192) <= budget { return 8192 }
+        if bytesPerGrid(4096) <= budget { return 4096 }
+        return 2048
+    }
     
     override init(frame frameRect: CGRect, device: MTLDevice?) {
-        super.init(frame: frameRect, device: device ?? MTLCreateSystemDefaultDevice())
+        let metalDevice = device ?? MTLCreateSystemDefaultDevice()
+        self.gridSize = GameOfLifeView.chooseGridSize(for: metalDevice)
+        super.init(frame: frameRect, device: metalDevice)
         setup()
     }
     
     required init(coder: NSCoder) {
+        let metalDevice = MTLCreateSystemDefaultDevice()
+        self.gridSize = GameOfLifeView.chooseGridSize(for: metalDevice)
         super.init(coder: coder)
         setup()
     }
@@ -37,6 +71,7 @@ class GameOfLifeView: MTKView {
         self.device = device
         self.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
         self.framebufferOnly = false
+        self.colorPixelFormat = .bgra8Unorm
         self.preferredFramesPerSecond = 60
         
         commandQueue = device.makeCommandQueue()!
@@ -51,29 +86,34 @@ class GameOfLifeView: MTKView {
         randomizeGrid(density: 0.3)
         
         // Setup mouse tracking
-        let trackingArea = NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways],
-            owner: self,
-            userInfo: nil
-        )
-        addTrackingArea(trackingArea)
-        
         self.delegate = self
         
-        print("✓ Game of Life initialized")
-        print("  Grid: \\(GRID_SIZE)×\\(GRID_SIZE) (\\(GRID_SIZE*GRID_SIZE/1_000_000)M cells)")
+        print("Game of Life initialized")
+        print("  Device: \(device.name)")
+        print("  Grid: \(gridSize)x\(gridSize) (\(gridSize * gridSize / 1_000_000)M cells)")
         print("  Controls:")
         print("    SPACE - Pause/Resume")
         print("    R - Randomize")
         print("    C - Clear")
+        print("    +/- - Zoom")
+        print("    Arrow keys - Pan")
     }
     
     func setupShaders() {
         guard let device = device else { return }
         
         // Load Metal library from source
-        let shaderSource = try! String(contentsOfFile: "../Shaders.metal")
+        let shaderPath = [
+            "Shaders.metal",
+            "./Shaders.metal",
+            "../Shaders.metal"
+        ].first { FileManager.default.fileExists(atPath: $0) }
+
+        guard let shaderPath else {
+            fatalError("Could not find Shaders.metal. Run the app from the project directory.")
+        }
+
+        let shaderSource = try! String(contentsOfFile: shaderPath)
         let library = try! device.makeLibrary(source: shaderSource, options: nil)
         
         gameOfLifePipeline = try! device.makeComputePipelineState(function: library.makeFunction(name: "gameOfLife")!)
@@ -86,9 +126,9 @@ class GameOfLifeView: MTKView {
         guard let device = device else { return }
         
         let textureDescriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .rgba32Float,
-            width: GRID_SIZE,
-            height: GRID_SIZE,
+            pixelFormat: .r8Uint,
+            width: gridSize,
+            height: gridSize,
             mipmapped: false
         )
         textureDescriptor.usage = [.shaderRead, .shaderWrite]
@@ -97,9 +137,6 @@ class GameOfLifeView: MTKView {
         // Double buffering
         stateTextures.append(device.makeTexture(descriptor: textureDescriptor)!)
         stateTextures.append(device.makeTexture(descriptor: textureDescriptor)!)
-        
-        // Display texture
-        displayTexture = device.makeTexture(descriptor: textureDescriptor)!
     }
     
     func randomizeGrid(density: Float = 0.3) {
@@ -114,7 +151,7 @@ class GameOfLifeView: MTKView {
         encoder.setBytes(&densityVar, length: MemoryLayout<Float>.size, index: 0)
         encoder.setBytes(&seed, length: MemoryLayout<UInt32>.size, index: 1)
         
-        let gridSize = MTLSize(width: GRID_SIZE, height: GRID_SIZE, depth: 1)
+        let gridSize = MTLSize(width: self.gridSize, height: self.gridSize, depth: 1)
         let threadGroupSize = MTLSize(width: 16, height: 16, depth: 1)
         encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadGroupSize)
         
@@ -130,7 +167,7 @@ class GameOfLifeView: MTKView {
         encoder.setComputePipelineState(clearPipeline)
         encoder.setTexture(stateTextures[currentStateIndex], index: 0)
         
-        let gridSize = MTLSize(width: GRID_SIZE, height: GRID_SIZE, depth: 1)
+        let gridSize = MTLSize(width: self.gridSize, height: self.gridSize, depth: 1)
         let threadGroupSize = MTLSize(width: 16, height: 16, depth: 1)
         encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadGroupSize)
         
@@ -143,13 +180,25 @@ class GameOfLifeView: MTKView {
         switch event.charactersIgnoringModifiers {
         case " ":
             isPaused.toggle()
-            print(isPaused ? "⏸ Paused" : "▶ Resumed")
+            print(isPaused ? "Paused" : "Resumed")
         case "r", "R":
             randomizeGrid(density: 0.3)
-            print("🔄 Randomized")
+            print("Randomized")
         case "c", "C":
             clearGrid()
-            print("🗑 Cleared")
+            print("Cleared")
+        case "+", "=":
+            zoom = min(zoom * 1.25, 32.0)
+        case "-", "_":
+            zoom = max(zoom / 1.25, 1.0)
+        case NSLeftArrowFunctionKey:
+            panX -= 0.04 / zoom
+        case NSRightArrowFunctionKey:
+            panX += 0.04 / zoom
+        case NSUpArrowFunctionKey:
+            panY -= 0.04 / zoom
+        case NSDownArrowFunctionKey:
+            panY += 0.04 / zoom
         default:
             super.keyDown(with: event)
         }
@@ -175,7 +224,7 @@ extension GameOfLifeView: MTKViewDelegate {
             encoder.setTexture(stateTextures[currentStateIndex], index: 0)
             encoder.setTexture(stateTextures[1 - currentStateIndex], index: 1)
             
-            let gridSize = MTLSize(width: GRID_SIZE, height: GRID_SIZE, depth: 1)
+            let gridSize = MTLSize(width: self.gridSize, height: self.gridSize, depth: 1)
             let threadGroupSize = MTLSize(width: 16, height: 16, depth: 1)
             encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadGroupSize)
             
@@ -185,33 +234,26 @@ extension GameOfLifeView: MTKViewDelegate {
         // Visualize
         encoder.setComputePipelineState(visualizePipeline)
         encoder.setTexture(stateTextures[currentStateIndex], index: 0)
-        encoder.setTexture(displayTexture, index: 1)
+        encoder.setTexture(drawable.texture, index: 1)
+
+        var uniforms = RenderUniforms(
+            gridWidth: UInt32(gridSize),
+            gridHeight: UInt32(gridSize),
+            viewportWidth: UInt32(drawable.texture.width),
+            viewportHeight: UInt32(drawable.texture.height),
+            time: elapsedTime,
+            zoom: zoom,
+            panX: panX,
+            panY: panY
+        )
+        encoder.setBytes(&uniforms, length: MemoryLayout<RenderUniforms>.stride, index: 0)
         
-        var time = elapsedTime
-        encoder.setBytes(&time, length: MemoryLayout<Float>.size, index: 0)
-        
-        let gridSize = MTLSize(width: GRID_SIZE, height: GRID_SIZE, depth: 1)
+        let gridSize = MTLSize(width: drawable.texture.width, height: drawable.texture.height, depth: 1)
         let threadGroupSize = MTLSize(width: 16, height: 16, depth: 1)
         encoder.dispatchThreads(gridSize, threadsPerThreadgroup: threadGroupSize)
         
         encoder.endEncoding()
-        
-        // Blit to drawable
-        if let blitEncoder = commandBuffer.makeBlitCommandEncoder() {
-            blitEncoder.copy(
-                from: displayTexture,
-                sourceSlice: 0,
-                sourceLevel: 0,
-                sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-                sourceSize: MTLSize(width: GRID_SIZE, height: GRID_SIZE, depth: 1),
-                to: drawable.texture,
-                destinationSlice: 0,
-                destinationLevel: 0,
-                destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
-            )
-            blitEncoder.endEncoding()
-        }
-        
+
         commandBuffer.present(drawable)
         commandBuffer.commit()
         
