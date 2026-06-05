@@ -201,6 +201,120 @@ func writeDensityPlot(_ values: [Double], path: String) throws {
     try writePNG(data, path: path)
 }
 
+struct TorusPoint {
+    let depth: Double
+    let x: Double
+    let y: Double
+    let radius: Double
+    let color: CGColor
+}
+
+func torusProjection(theta: Double, phi: Double, canvasWidth: Int, canvasHeight: Int) -> (x: Double, y: Double, depth: Double, light: Double) {
+    let majorRadius = 1.55
+    let minorRadius = 0.56
+    let tube = majorRadius + minorRadius * cos(phi)
+
+    var x = tube * cos(theta)
+    var y = tube * sin(theta)
+    var z = minorRadius * sin(phi)
+
+    let zRotation = -0.58
+    let xAfterZ = x * cos(zRotation) - y * sin(zRotation)
+    let yAfterZ = x * sin(zRotation) + y * cos(zRotation)
+    x = xAfterZ
+    y = yAfterZ
+
+    let xRotation = 0.98
+    let yAfterX = y * cos(xRotation) - z * sin(xRotation)
+    let zAfterX = y * sin(xRotation) + z * cos(xRotation)
+    y = yAfterX
+    z = zAfterX
+
+    let scale = Double(min(canvasWidth, canvasHeight)) * 0.28
+    let screenX = Double(canvasWidth) * 0.50 + x * scale
+    let screenY = Double(canvasHeight) * 0.52 - y * scale
+    let light = max(0.20, min(1.0, 0.50 + z * 0.40 + sin(phi) * 0.20))
+
+    return (screenX, screenY, z, light)
+}
+
+func writeTorusPNG(_ life: ToroidalLife, path: String) throws {
+    let width = 1040
+    let height = 760
+
+    let data = try pngData(width: width, height: height) { context in
+        context.setShouldAntialias(true)
+        context.setAllowsAntialiasing(true)
+        context.setFillColor(CGColor(red: 0.015, green: 0.018, blue: 0.030, alpha: 1.0))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+
+        var points: [TorusPoint] = []
+
+        for y in stride(from: 0, to: life.height, by: 2) {
+            for x in stride(from: 0, to: life.width, by: 2) {
+                let theta = (Double(x) / Double(life.width)) * Double.pi * 2.0
+                let phi = (Double(y) / Double(life.height)) * Double.pi * 2.0
+                let projected = torusProjection(theta: theta, phi: phi, canvasWidth: width, canvasHeight: height)
+                let shade = projected.light
+
+                points.append(TorusPoint(
+                    depth: projected.depth,
+                    x: projected.x,
+                    y: projected.y,
+                    radius: 2.2,
+                    color: CGColor(red: 0.05 * shade, green: 0.22 * shade, blue: 0.27 * shade, alpha: 0.50)
+                ))
+            }
+        }
+
+        for y in 0..<life.height {
+            for x in 0..<life.width where life.alive(x, y) {
+                let theta = (Double(x) / Double(life.width)) * Double.pi * 2.0
+                let phi = (Double(y) / Double(life.height)) * Double.pi * 2.0
+                let projected = torusProjection(theta: theta, phi: phi, canvasWidth: width, canvasHeight: height)
+                let front = max(0.0, min(1.0, (projected.depth + 1.6) / 3.2))
+                let shade = projected.light
+
+                points.append(TorusPoint(
+                    depth: projected.depth + 0.01,
+                    x: projected.x,
+                    y: projected.y,
+                    radius: 3.0 + front * 2.8,
+                    color: CGColor(
+                        red: min(1.0, 0.25 + 0.50 * shade + 0.20 * front),
+                        green: min(1.0, 0.72 + 0.22 * shade),
+                        blue: min(1.0, 0.68 + 0.24 * front),
+                        alpha: 0.72 + 0.25 * front
+                    )
+                ))
+            }
+        }
+
+        for point in points.sorted(by: { $0.depth < $1.depth }) {
+            context.setFillColor(point.color)
+            context.fillEllipse(in: CGRect(
+                x: point.x - point.radius,
+                y: point.y - point.radius,
+                width: point.radius * 2.0,
+                height: point.radius * 2.0
+            ))
+        }
+
+        let title = "Toroidal plane projected as a 3D torus"
+        let subtitle = "Live cells are mapped from the wrapped 2D grid onto the donut surface"
+        title.draw(at: CGPoint(x: 42, y: 34), withAttributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 22, weight: .semibold),
+            .foregroundColor: NSColor(red: 0.88, green: 0.94, blue: 0.96, alpha: 1.0)
+        ])
+        subtitle.draw(at: CGPoint(x: 42, y: 64), withAttributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 14, weight: .regular),
+            .foregroundColor: NSColor(red: 0.57, green: 0.68, blue: 0.72, alpha: 1.0)
+        ])
+    }
+
+    try writePNG(data, path: path)
+}
+
 let outputDirectory = "Visualizations"
 try FileManager.default.createDirectory(atPath: outputDirectory, withIntermediateDirectories: true)
 
@@ -213,6 +327,7 @@ for generation in 0...256 {
 
     if generation == 64 {
         try writeGridPNG(randomLife, path: "\(outputDirectory)/generation-064.png", cellSize: 6)
+        try writeTorusPNG(randomLife, path: "\(outputDirectory)/toroidal-plane-3d.png")
     }
 
     randomLife.step()
